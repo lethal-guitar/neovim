@@ -2281,14 +2281,54 @@ void spell_cat_line(char_u *buf, char_u *line, int maxlen)
   }
 }
 
+// Determine correct file name and load spell file.
+static int spell_load_spell_file_basic(
+  char_u *lang,
+  spelload_T *sl,
+  bool use_ascii_fallback,
+  bool load_additionals
+)
+{
+  char_u fname_enc[85];
+  char_u *encoding = spell_enc();
+  char   *pattern = "spell/%s.%s.%s";
+  char   *extension = "spl";
+
+  if (use_ascii_fallback) {
+    encoding = (char_u *)"ascii";
+  }
+  if (load_additionals) {
+    extension = "add.spl";
+  }
+
+  vim_snprintf((char *)fname_enc, sizeof(fname_enc)-1, pattern, lang, encoding,
+      extension);
+  return do_in_runtimepath(fname_enc, FALSE, spell_load_cb, sl);
+}
+
+// Load spell file for lang. Try both sp_enc() and ASCII versions.
+static int spell_load_spell_file(char_u *lang, spelload_T *sl,
+    bool *tried_ascii_fallback)
+{
+  *tried_ascii_fallback = false;
+
+  // Find the first spell file for "lang" in 'runtimepath' and load it.
+  int r = spell_load_spell_file_basic(lang, sl, false, false);
+
+  if (r == FAIL && *sl->sl_lang != NUL) {
+    // Try loading the ASCII version.
+    r = spell_load_spell_file_basic(lang, sl, true, false);
+    *tried_ascii_fallback = true;
+  }
+  return r;
+}
+
 // Load word list(s) for "lang" from Vim spell file(s).
 // "lang" must be the language without the region: e.g., "en".
 static void spell_load_lang(char_u *lang)
 {
-  char_u fname_enc[85];
   int r;
   spelload_T sl;
-  int round;
 
   // Copy the language name to pass it to spell_load_cb() as a cookie.
   // It's truncated when an error is detected.
@@ -2296,29 +2336,16 @@ static void spell_load_lang(char_u *lang)
   sl.sl_slang = NULL;
   sl.sl_nobreak = FALSE;
 
-  // We may retry when no spell file is found for the language, an
-  // autocommand may load it then.
-  for (round = 1; round <= 2; ++round) {
-    // Find the first spell file for "lang" in 'runtimepath' and load it.
-    vim_snprintf((char *)fname_enc, sizeof(fname_enc) - 5,
-        "spell/%s.%s.spl",
-        lang, spell_enc());
-    r = do_in_runtimepath(fname_enc, FALSE, spell_load_cb, &sl);
+  bool use_ascii = false;
+  r = spell_load_spell_file(lang, &sl, &use_ascii);
 
-    if (r == FAIL && *sl.sl_lang != NUL) {
-      // Try loading the ASCII version.
-      vim_snprintf((char *)fname_enc, sizeof(fname_enc) - 5,
-          "spell/%s.ascii.spl",
-          lang);
-      r = do_in_runtimepath(fname_enc, FALSE, spell_load_cb, &sl);
-
-      if (r == FAIL && *sl.sl_lang != NUL && round == 1
-          && apply_autocmds(EVENT_SPELLFILEMISSING, lang,
-              curbuf->b_fname, FALSE, curbuf))
-        continue;
-      break;
+  if (r == FAIL && *sl.sl_lang != NUL) {
+    // We may retry when no spell file is found for the language, an
+    // autocommand may load it then.
+    if (apply_autocmds(EVENT_SPELLFILEMISSING, lang,
+          curbuf->b_fname, FALSE, curbuf)) {
+      r = spell_load_spell_file(lang, &sl, &use_ascii);
     }
-    break;
   }
 
   if (r == FAIL) {
@@ -2327,8 +2354,7 @@ static void spell_load_lang(char_u *lang)
         lang, spell_enc(), lang);
   } else if (sl.sl_slang != NULL) {
     // At least one file was loaded, now load ALL the additions.
-    STRCPY(fname_enc + STRLEN(fname_enc) - 3, "add.spl");
-    do_in_runtimepath(fname_enc, TRUE, spell_load_cb, &sl);
+    spell_load_spell_file_basic(lang, &sl, use_ascii, true);
   }
 }
 
